@@ -1,0 +1,37 @@
+{
+  "name": "cold-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Cold-start web agent runner for UX exploration and testing",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "postinstall": "playwright install chromium"
+  },
+  "keywords": ["web-agent", "playwright", "ux-testing", "automation"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@browserbasehq/stagehand": "^1.13.0",
+    "express": "^4.21.2",
+    "playwright": "^1.50.0",
+    "uuid": "^11.0.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.7",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.4"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
