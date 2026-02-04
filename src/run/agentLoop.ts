@@ -1,5 +1,4 @@
 import type { Page } from 'playwright';
-import { spawn } from 'child_process';
 import type {
   AgentAction,
   DecisionContext,
@@ -14,6 +13,9 @@ import type {
 import { buildSnapshot, getPageKey, findSearchBox, findHelpLink, findElementByRef, findElementByText } from './snapshot.js';
 import type { EvidenceCollector } from './evidence.js';
 import { appendStepLog } from './evidence.js';
+import { callClaudeCli } from '../llm/claudeCli.js';
+import { callAnthropic } from '../llm/anthropicSdk.js';
+import { callClaudeTmux } from '../llm/claudeTmux.js';
 
 const MIN_ACTION_DELAY_MS = 300;
 const MAX_ACTION_DELAY_MS = 700;
@@ -260,74 +262,21 @@ async function decideNextAction(
 
   const fullPrompt = `${systemPrompt}\n\n---\n\n${userPrompt}`;
 
-  const text = await callClaudeCodeCLI(fullPrompt);
+  // Priority: 1) API key → SDK, 2) CLI pipe mode with OAuth, 3) tmux fallback
+  let text: string;
+  if (process.env.ANTHROPIC_API_KEY) {
+    text = await callAnthropic(fullPrompt);
+  } else if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    // CLI pipe mode is faster than tmux when OAuth token is available
+    text = await callClaudeCli(fullPrompt, { outputFormat: 'text' });
+  } else if (process.env.USE_TMUX === '1') {
+    // Fall back to tmux if explicitly enabled
+    text = await callClaudeTmux(fullPrompt);
+  } else {
+    // Default to CLI pipe mode
+    text = await callClaudeCli(fullPrompt, { outputFormat: 'text' });
+  }
   return parseActionResponse(text);
-}
-
-async function callClaudeCodeCLI(prompt: string): Promise<string> {
-  const TIMEOUT_MS = 90000; // 90 second timeout
-  const { writeFileSync, unlinkSync } = await import('fs');
-  const { tmpdir } = await import('os');
-  const { join } = await import('path');
-
-  // Write prompt to temp file to avoid shell argument limits
-  const tempFile = join(tmpdir(), `claude-prompt-${Date.now()}.txt`);
-  writeFileSync(tempFile, prompt, 'utf8');
-
-  return new Promise((resolve, reject) => {
-    console.log('[cold-agent] Calling Claude CLI...');
-    console.log(`[cold-agent] Prompt length: ${prompt.length} chars`);
-
-    // Use cat to read the temp file and pipe to claude
-    const child = spawn('sh', ['-c', `cat "${tempFile}" | claude --output-format text`], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
-    });
-
-    let stdout = '';
-    let stderr = '';
-    let timedOut = false;
-
-    const cleanup = () => {
-      try { unlinkSync(tempFile); } catch {}
-    };
-
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-      cleanup();
-      reject(new Error(`Claude CLI timed out after ${TIMEOUT_MS / 1000} seconds`));
-    }, TIMEOUT_MS);
-
-    child.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr.on('data', (data) => {
-      stderr += data.toString();
-      console.log(`[cold-agent] stderr: ${data.toString().slice(0, 200)}`);
-    });
-
-    child.on('close', (code) => {
-      clearTimeout(timeout);
-      cleanup();
-      if (timedOut) return;
-
-      console.log(`[cold-agent] Claude CLI exited with code ${code}`);
-      if (code === 0) {
-        console.log(`[cold-agent] Response: ${stdout.slice(0, 300)}...`);
-        resolve(stdout.trim());
-      } else {
-        reject(new Error(`Claude CLI exited with code ${code}: ${stderr}`));
-      }
-    });
-
-    child.on('error', (err) => {
-      clearTimeout(timeout);
-      cleanup();
-      reject(new Error(`Failed to spawn Claude CLI: ${err.message}`));
-    });
-  });
 }
 
 function buildSystemPrompt(): string {
@@ -410,7 +359,33 @@ function parseActionResponse(text: string): AgentAction {
   } catch (e) {
     throw new Error(`Invalid JSON in response: ${jsonMatch[0].slice(0, 200)}... Error: ${e}`);
   }
-  let action = parsed.action;
+  
+  // Support both "action" and "command" keys (Claude varies its format)
+  let action = parsed.action ?? parsed.command;
+
+  // Handle flat format: {"action":"click","target":"lin_7"} or {"command":"click","target":"lin_7"}
+  // where action/command is the type string itself
+  if (typeof action === 'string') {
+    // The type is in "action"/"command", other fields are at root level
+    action = { type: action, ...parsed };
+    delete action.action;
+    delete action.command;
+    if (parsed.thinking) delete action.thinking;
+    console.log(`[cold-agent] Converted flat format to: ${JSON.stringify(action)}`);
+  }
+  
+  // Handle double-nested: {"action": {"action": "click", ...}} or {"action": {"command": "click", ...}}
+  if (action && typeof action === 'object' && (action.action || action.command)) {
+    const innerType = action.action ?? action.command;
+    if (typeof innerType === 'string') {
+      // Extract type from inner action/command key
+      action = { type: innerType, ...action };
+      delete action.action;
+      delete action.command;
+      if (action.thinking) delete action.thinking;
+      console.log(`[cold-agent] Unwrapped nested action to: ${JSON.stringify(action)}`);
+    }
+  }
 
   if (!action) {
     throw new Error('No action in response');

@@ -8,6 +8,7 @@ import { runAgentLoop } from './agentLoop.js';
 import { evaluateRun } from './evaluator.js';
 
 const RUNS_DIR = 'runs';
+const MAX_CONCURRENT_RUNS = Math.max(1, Number(process.env.MAX_CONCURRENT_RUNS || 2));
 
 export interface RunOrchestrator {
   startRun(request: RunCreateRequest): Promise<string>;
@@ -17,6 +18,8 @@ export interface RunOrchestrator {
 
 // In-memory store for active runs
 const activeRuns = new Map<string, RunState>();
+const pendingQueue: RunState[] = [];
+let runningCount = 0;
 
 export function createRunOrchestrator(): RunOrchestrator {
   return {
@@ -46,26 +49,8 @@ export function createRunOrchestrator(): RunOrchestrator {
 
       activeRuns.set(runId, runState);
 
-      // Start run asynchronously
-      executeRun(runState).catch(error => {
-        console.error(`Run ${runId} failed:`, error);
-        runState.status = 'fail';
-        runState.endedAt = new Date();
-        runState.report = {
-          runId,
-          status: 'fail',
-          goal: request.goal,
-          baseUrl: request.baseUrl,
-          startedAt: runState.startedAt.toISOString(),
-          endedAt: new Date().toISOString(),
-          findings: [],
-          artifacts: {
-            stepsJson: 'artifacts/steps.json',
-            screenshotsDir: 'artifacts/screens/',
-          },
-          error: error instanceof Error ? error.message : String(error),
-        };
-      });
+      // Enqueue run asynchronously (global concurrency limit)
+      enqueueRun(runState);
 
       return runId;
     },
@@ -126,6 +111,42 @@ export function createRunOrchestrator(): RunOrchestrator {
       );
     },
   };
+}
+
+function enqueueRun(runState: RunState): void {
+  pendingQueue.push(runState);
+  void processQueue();
+}
+
+async function processQueue(): Promise<void> {
+  while (runningCount < MAX_CONCURRENT_RUNS && pendingQueue.length > 0) {
+    const next = pendingQueue.shift()!;
+    runningCount++;
+    executeRun(next)
+      .catch((error) => {
+        console.error(`Run ${next.runId} failed:`, error);
+        next.status = 'fail';
+        next.endedAt = new Date();
+        next.report = {
+          runId: next.runId,
+          status: 'fail',
+          goal: next.config.goal,
+          baseUrl: next.config.baseUrl,
+          startedAt: next.startedAt.toISOString(),
+          endedAt: new Date().toISOString(),
+          findings: [],
+          artifacts: {
+            stepsJson: 'artifacts/steps.json',
+            screenshotsDir: 'artifacts/screens/',
+          },
+          error: error instanceof Error ? error.message : String(error),
+        };
+      })
+      .finally(() => {
+        runningCount--;
+        void processQueue();
+      });
+  }
 }
 
 async function executeRun(runState: RunState): Promise<void> {

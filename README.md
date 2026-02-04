@@ -13,7 +13,7 @@ A "cold start" web agent runner that explores web applications like a human user
 
 ## How It Works
 
-Cold Agent uses **Claude Code CLI** for AI-powered decision making, which means it uses your Claude Pro/Max subscription credits - no separate API key needed. The agent:
+Cold Agent uses **Claude Code CLI** for AI-powered decision making, which means it can use your Claude Pro/Max subscription credits via OAuth token - no separate API key needed (though you can use an API key if preferred). The agent:
 
 1. Captures a compact accessibility (a11y) snapshot of the current page
 2. Sends the snapshot to Claude via CLI with the goal and history context
@@ -26,7 +26,28 @@ Cold Agent uses **Claude Code CLI** for AI-powered decision making, which means 
 ### Prerequisites
 
 - Node.js 20+
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated with your Claude Pro/Max subscription
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed
+
+### One-Time Claude Setup
+
+Cold Agent uses your Claude Pro/Max subscription via OAuth token. **Run this once:**
+
+```bash
+# Install Claude CLI if you haven't
+npm install -g @anthropic-ai/claude-code
+
+# Run Claude once to create config file
+claude
+# Complete any first-time setup prompts, then exit with Ctrl+C
+
+# Get a long-lived OAuth token (opens browser for auth)
+claude setup-token
+
+# Copy the token it outputs and set it:
+export CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-..."
+```
+
+Add the export to your `~/.zshrc` or `~/.bashrc` to persist it.
 
 ### Installation
 
@@ -39,6 +60,9 @@ This will also install Chromium for Playwright.
 ### Running the Server
 
 ```bash
+# Set the OAuth token (if not in your shell profile)
+export CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-..."
+
 # Development mode with hot reload
 npm run dev
 
@@ -48,6 +72,17 @@ npm start
 ```
 
 The server starts on `http://localhost:3000` by default.
+
+### Troubleshooting Auth
+
+If you see "Credit balance is too low":
+1. You may have an old `ANTHROPIC_API_KEY` set - unset it: `unset ANTHROPIC_API_KEY`
+2. Re-run `claude setup-token` in your terminal
+3. Make sure you're logging in with your Pro/Max account
+
+If Claude keeps asking for setup prompts:
+1. Run `claude` interactively once to complete setup
+2. Make sure `~/.claude.json` exists
 
 ## API Usage
 
@@ -59,6 +94,21 @@ curl -X POST http://localhost:3000/runs \
   -d '{
     "baseUrl": "https://example.com",
     "goal": "Find the contact page and locate the email address"
+  }'
+```
+
+### Start Multiple Runs (Batch)
+
+If you want to kick off many missions at once:
+
+```bash
+curl -X POST http://localhost:3000/runs/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "runs": [
+      { "baseUrl": "https://example.com", "goal": "Find pricing for teams" },
+      { "baseUrl": "https://example.com", "goal": "Locate the security settings page" }
+    ]
   }'
 ```
 
@@ -113,11 +163,111 @@ curl -X POST http://localhost:3000/runs \
 curl http://localhost:3000/runs/20260127_abc12345
 ```
 
+### View Human-Friendly HTML Report
+
+Once a run finishes, you can open an HTML report (summary + findings + step timeline with screenshots/video):
+
+```bash
+open http://localhost:3000/runs/20260127_abc12345/report
+```
+
+The HTML report includes:
+- Deep links like `#step-12` for sharing a specific point in the run
+- A **Create GitHub issue** panel (if `GITHUB_REPO`/`GITHUB_TOKEN` are configured)
+
 ### List All Runs
 
 ```bash
 curl http://localhost:3000/runs
 ```
+
+### Create a GitHub Issue from a Run
+
+Configure:
+
+```bash
+export GITHUB_REPO="owner/repo"
+export GITHUB_TOKEN="ghp_... (PAT with repo permissions)"
+```
+
+Then:
+
+```bash
+curl -X POST http://localhost:3000/runs/20260127_abc12345/issues/github \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Signup flow is hard to discover",
+    "labels": ["ux", "bug"]
+  }'
+```
+
+Response:
+
+```json
+{ "number": 123, "url": "https://github.com/owner/repo/issues/123", "title": "Signup flow is hard to discover" }
+```
+
+## Personas (Generate Missions)
+
+You can describe a persona (who they are + what they want to learn/use) and have the LLM generate multiple specific missions/questions.
+
+### Generate Persona Questions
+
+```bash
+curl -X POST http://localhost:3000/personas/questions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "baseUrl": "https://example.com",
+    "siteDescription": "Project management SaaS for enterprise teams with Gantt charts, resource allocation, and reporting",
+    "count": 6,
+    "persona": {
+      "name": "IT Admin",
+      "description": "A new IT admin responsible for onboarding employees and configuring access.",
+      "interests": ["user management", "SSO", "permissions", "audit logs", "billing"]
+    }
+  }'
+```
+
+**Important**: Include `siteDescription` to tell the LLM what your site/product does. Without it, the LLM may guess wrong (especially for domain names similar to other products).
+
+### Generate Persona Questions and Start Batch Runs
+
+This generates questions and starts one agent run per question (runs execute in parallel, limited by `MAX_CONCURRENT_RUNS`):
+
+```bash
+curl -X POST http://localhost:3000/personas/runs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "baseUrl": "https://dyrt.co",
+    "siteDescription": "AI-powered waste intelligence platform for analyzing invoices and tracking diversion rates",
+    "count": 4,
+    "persona": {
+      "description": "waste facilities manager looking for software solutions",
+      "interests": ["waste management software", "compost monitoring", "facility operations"]
+    },
+    "budgets": { "maxSteps": 25, "maxMinutes": 4 },
+    "options": { "headless": true, "recordVideo": true }
+  }'
+```
+
+Response:
+
+```json
+{
+  "persona": { "description": "...", "interests": [...] },
+  "siteDescription": "...",
+  "questions": ["Find pricing info...", "Locate case studies...", "..."],
+  "runIds": ["20260204_abc123", "20260204_def456", "..."]
+}
+```
+
+Each agent's goal is prefixed with persona context so it knows who it's acting as:
+
+```
+[Persona: waste facilities manager | Interests: waste management, compost monitoring] Find pricing info...
+```
+
+Set `"embedPersona": false` in the request to disable this.
 
 ## Run Report Structure
 
@@ -227,12 +377,56 @@ Progress is marked as:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | Server port | 3000 |
+| `MAX_CONCURRENT_RUNS` | Max simultaneous Playwright runs (global queue) | 2 |
+| `CLAUDE_CODE_OAUTH_TOKEN` | OAuth token from `claude setup-token` (Pro/Max subscription) | (none) |
+| `ANTHROPIC_API_KEY` | Alternative: use API key instead of OAuth (uses API credits) | (none) |
+| `USE_TMUX` | Set to `1` to use tmux interactive mode instead of pipe mode | `0` |
+| `GITHUB_REPO` | GitHub repo to create issues in (`owner/repo`) | (none) |
+| `GITHUB_TOKEN` | GitHub token (PAT) used for issue creation | (none) |
+
+**Claude Mode Priority**:
+1. If `ANTHROPIC_API_KEY` is set → uses Anthropic SDK (API credits, fastest)
+2. If `CLAUDE_CODE_OAUTH_TOKEN` is set → uses CLI pipe mode (`claude -p`, Pro/Max subscription, **recommended**)
+3. If `USE_TMUX=1` → uses tmux interactive mode (slower, useful for debugging)
 
 ## Technical Notes
 
-### Claude CLI Integration
+### Claude Integration
 
-The agent uses Claude Code CLI (`claude` command) with prompts piped via stdin. Prompts are phrased as "analysis questions" (e.g., "I'm testing a web application and need to decide the next UI action") rather than role-playing directives to work smoothly with Claude Code's prompt handling.
+Cold Agent supports three modes for calling Claude:
+
+**1. CLI Pipe Mode (Recommended)**
+
+Uses `claude -p` with your Pro/Max subscription via OAuth token. This is the fastest non-API option (~7-8 seconds per step).
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-..."
+npm run dev
+```
+
+**2. Anthropic SDK**
+
+Uses the Anthropic API directly. Fastest option but uses API credits instead of subscription.
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+npm run dev
+```
+
+**3. tmux Interactive Mode (Legacy)**
+
+Runs Claude in a tmux session (like [Gastown](https://steve-yegge.medium.com/welcome-to-gas-town-4f25ee16dd04)). Slower (~30-60 seconds per step) but useful for debugging.
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-..."
+export USE_TMUX=1
+npm run dev
+
+# Attach to see what Claude is doing:
+tmux attach -t cold-agent-claude
+```
+
+Prompts are phrased as "analysis questions" (e.g., "I'm testing a web application and need to decide the next UI action") rather than role-playing directives to work smoothly with Claude Code's prompt handling.
 
 ### Response Format Handling
 

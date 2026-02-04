@@ -51,6 +51,48 @@ export type RunOptions = z.infer<typeof RunOptionsSchema>;
 export type RunCreateRequest = z.infer<typeof RunCreateRequestSchema>;
 
 // ============================================================================
+// Persona + Question Generation Types
+// ============================================================================
+
+export const PersonaSchema = z.object({
+  name: z.string().min(1).optional(),
+  description: z.string().min(20), // free-form: who they are, context, constraints
+  interests: z.array(z.string().min(2)).optional(), // systems/tools/tasks they're curious about
+});
+
+export const PersonaQuestionGenRequestSchema = z.object({
+  baseUrl: z.string().url(),
+  persona: PersonaSchema,
+  count: z.number().int().min(1).max(20).default(6),
+  // optional extra guidance to shape questions
+  focus: z.string().min(1).optional(),
+  // optional: describe what the site/product does (prevents LLM from guessing wrong)
+  siteDescription: z.string().min(10).optional(),
+});
+
+export const PersonaQuestionGenResponseSchema = z.object({
+  questions: z.array(z.string().min(5)).min(1),
+});
+
+export type Persona = z.infer<typeof PersonaSchema>;
+export type PersonaQuestionGenRequest = z.infer<typeof PersonaQuestionGenRequestSchema>;
+export type PersonaQuestionGenResponse = z.infer<typeof PersonaQuestionGenResponseSchema>;
+
+// ============================================================================
+// Batch Run Types
+// ============================================================================
+
+export const RunBatchCreateRequestSchema = z.object({
+  runs: z.array(RunCreateRequestSchema).min(1).max(25),
+});
+
+export type RunBatchCreateRequest = z.infer<typeof RunBatchCreateRequestSchema>;
+
+export interface RunBatchCreateResponse {
+  runIds: string[];
+}
+
+// ============================================================================
 // Action Types
 // ============================================================================
 
